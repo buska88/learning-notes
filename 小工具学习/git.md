@@ -34,3 +34,7 @@ git push origin --delete [分支名]
 此时这个文件还没有git add，git diff比较的是工作区文件和上一次git add后文件的差异,把工作区add进去之后，再次git diff，发现就没有差异了。
 
 git diff commitid1 commitid2：查到两个提交的diff
+
+**git bisect** 
+
+http://www.ruanyifeng.com/blog/2018/12/git-bisect.html
