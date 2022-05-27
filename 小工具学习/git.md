@@ -35,6 +35,6 @@ git push origin --delete [分支名]
 
 git diff commitid1 commitid2：查到两个提交的diff
 
-**git bisect** 
+**git bisect**
 
 http://www.ruanyifeng.com/blog/2018/12/git-bisect.html
