@@ -38,3 +38,14 @@ git diff commitid1 commitid2：查到两个提交的diff
 **git bisect**
 
 http://www.ruanyifeng.com/blog/2018/12/git-bisect.html
+
+git文件生命周期：
+
+* 未跟踪——》git add——〉已跟踪未修改——》一些修改操作——〉已修改未提交——》commit——〉已提交，工作区干净
+* 已修改——》gitadd——〉已修改未提交——》commit——〉已提交，工作区干净
+
+![1653621238403.png](image/git/1653621238403.png)
+
+在这个git.md文件上做修改后，提示尚未暂存；执行git add后，提示要提交
+
+git add：可以用它开始跟踪新文件，或者把已跟踪的文件放到暂存区，还能用于合并时把有冲突的文件标记为已解决状态等。 将这个命令理解为“添加内容到下一次提交中”而不是“将一个文件添加到项目中”要更加合适。
