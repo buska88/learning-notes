@@ -309,6 +309,84 @@ class ThreadedTree {
 
 
 
+## 10 算法
+
+### 10.2 分治
+
+分：递归解决小问题 治：使用小问题的构建原问题
+
+只有一个递归历程的不能叫分治。
+
+**最近点对问题**
+
+核心思想：O(N2)的算法很好想，但是O(NlogN)的算法就只能按照分治实现,把节点以x轴做分割，计算分割线左边最小值dl,右边最小值dr，两边中间最小值dc，且证明，当两个点x,y的距离小于min(dl,dr)=delta时，这两个点一定位于[分割线x坐标-delta，分割线x坐标+delta]内，且位于这个区间里的点大小为常数个：
+
+<img src="数据结构与算法java.assets/image-20220628094556139.png" alt="image-20220628094556139" style="zoom:50%;" />
+
+可以看出，左边区域内最多有4个点，分别在四个角的位置，再放第5个点时它肯定会和其中一个点的距离小于delta，不满足条件；右边区域也是一样的。
+
+https://www.jianshu.com/p/8bc681afbaff
+
+```java
+分治法求解最近点对距离
+———————————————————————————————————————————————
+输入:点集合points，且x递增points[i][0] = xi,points[i][0]=yi
+———————————————————————————————————————————————
+输出:最近点对距离distance，最近点对point1,point2
+———————————————————————————————————————————————
+public Tuple2[] Closest_pair(Tuple2[] points)//单个区间的计算
+    length=points.length // 获取数组长度
+  	quicksortByX(points)//把points按照x排序
+    return ClosestPair(Point points[],0, length-1) // 求最近点对及最近点对距离
+
+public Tuple2[] ClosestPair(Point points[], int start, int end)
+  	int length = end - start + 1;
+    if length< 2
+        return Integer.MAXVALUE // 如果数组长度小于2 返回无穷大
+    
+    else if length = 2
+        return distance(points[0],points[1] // 如果数组长度等于2 返回该两点的距离
+ 
+    else // 数组长度大于3
+        int mid = start + (end - start)/2；// 获取中线索引	
+        d1 = ClosestPair(points, start, mid);             //分治求解左半部分子集的最近点  
+        d2 = ClosestPair(points, mid + 1, end);    //分治求解右半部分子集的最近点 
+        d = min(d1,d2)
+        
+        // merge 合并子集解，从mid向左右遍历常数个点就可以
+        List<Tuple2> llist = new ArrayList<>();
+        List<Tuple2> rlist = new ArrayList<>();
+        for(int i = mid; i >= start; i--) {//常数操作
+          if (Math.abs(points[i][0] - points[mid][0]) > d) break;
+          list.add(points[i])
+        }
+        for(int j = mid + 1; j <= end; j++) {
+          if (Math.abs(points[j][0] - points[mid][0]) > d) break;
+          rlist.add(points[i])
+        }
+        for(Tuple2 leftpoint : llist) {
+          for(Tuple2 reftpoint : rlist) 
+            if(Math.abs(leftpoint[1] - reftpoint[1]) > d) continue;//y轴大于d不考虑
+            d = Math.min(d,dist(leftpoint,reftpoint))
+          }
+        }
+
+        return d;                
+
+```
+
+整个merge过程只操作常数个节点，所以时间复杂度是O(1)
+
+T(n)=2T(n/2)+O(1),得到ClosestPair的时间复杂度是O(N)
+
+加上之前对x的排序过程，所以总的时间复杂度是O(nlogn)
+
+如果x本身是有序的，那么时间复杂度就是O(N)
+
+### 10.3 动态规划
+
+
+
 
 
 

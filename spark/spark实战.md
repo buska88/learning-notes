@@ -1,4 +1,4 @@
-# spark 实战
+# spark 实战与调优
 
 ## 本地编译spark
 
@@ -56,3 +56,119 @@ https://blog.csdn.net/ChrisLu777/article/details/113739910?spm=1001.2101.3001.66
 ![1653360827243.png](spark实战.assets/1653360827243.png)
 
 然后使用idea将项目打成jar包放到spark命令行下执行。
+
+## 数据倾斜问题
+
+http://arganzheng.life/spark-data-skew.html
+
+http://www.jasongj.com/spark/skew/
+
+**数据倾斜定位：**
+
+数据倾斜只会发生在 shuffle 过程中
+
+1.可以到spark ui 的sql界面搜索skew关键字查看是否出现数据倾斜
+
+![image-20220715192656630](spark实战.assets/image-20220715192656630.png)
+
+2.到某一个stage界面看task处理的数据量分布情况也可以。
+
+3.如果不是sql代码的话，也可以自己验证key出现的次数。
+
+```
+df.select("key").sample(false, 0.1)           // 数据采样 
+    .(k => (k, 1)).reduceBykey(_ + _)         // 统计 key 出现的次数
+    .map(k => (k._2, k._1)).sortByKey(false)  // 根据 key 出现次数进行排序
+    .take(10)                                 // 取前 10 个。
+```
+
+**引起数据倾斜的原因**
+
+读取源数据时引发：
+
+* 读取Kafka，kafka的一个topic可分为多个partition，kafka的一个partition对应spark一个task，如果kafka一个topic消息在不同分区的分布不均匀的话，那么就会导致数据倾斜。
+
+* 读hdfs文件，对于不可切分的文件，文件自己就对应一个分区；对于可切分的文件，每个split对于一个task大小，如果数据块不均的话也会导致数据倾斜：
+
+  ```java
+  protected long computeSplitSize(long goalSize, long minSize, long blockSize) {
+      return Math.max(minSize, Math.min(goalSize, blockSize));
+  }
+  goalSize：文件总大小/minPartitions【这个参数也是由cpu核数和spark.default.parallelism决定】
+  minSize:hdfs中的一个阈值
+  blockSize:hadoop块大小   
+  ```
+
+  
+
+  
+
+**缓解数据倾斜的方法：**
+
+* 过滤异常数据，比如某个引起倾斜的key本身是异常的，使用filter算子过滤掉它即可
+
+* 提高shuffle并行度
+
+  * 对于sql：设置spark.sql.shuffle.partitions=[num_tasks]，不过有时候设置了这个参数未必就能提升具体stage的并行度
+  * 对于普通spark作业：直接在算子上调整并发度活设置spark.default.parallelism
+
+* 自定义partitioner
+
+  ```
+  考虑key = 0，1，2，3，4，5路由到3个分区
+  普通hash分区方式：key%hash
+  但是如果2的数据远超其他key的话，可以重新定义分区器，让key=2的数据放到分区3，其他key路由到前两个分区：
+  .groupByKey(new Partitioner() {
+    @Override
+    public int numPartitions() {
+      return 3;
+    }
+  
+    @Override
+    public int getPartition(Object key) {
+      int id = Integer.parseInt(key.toString());
+      if(id == 2) {
+        return 3;
+      } else {
+        return id % 2;
+      }
+    }
+  })
+  ```
+
+  
+
+* 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

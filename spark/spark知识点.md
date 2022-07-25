@@ -242,7 +242,17 @@ private[spark] abstract class DelayEventLoop[E](name: String) extends Logging {
   * Container(容器，等价于executer)
     * Task
 
+yarn资源分配
 
+https://zhuanlan.zhihu.com/p/335881182
+
+通过yarn集群的web ui可以看到yarn集群总体的memory数据和所有vcore数据，在yarn中资源通过container分配，比如这个yarn集群有10G内存，10vcore，一共有2个nm，每个nm5g内存，5vcore。 1个container申请1vcore和1内存，那么这个一个nm最多能分配5个container。当然在yarn-default.xml是可以配置每个nm可以使用的资源的。
+
+vcore方面：什么是vcore?考虑不同节点的CPU的性能不一样，每个CPU的计算能力不一样。比如某个物理CPU是另外一个物理CPU的2倍，这时通过设置第一个物理CPU的虚拟core来弥补这种差异。第一台机器 强悍 pcore: vcore=1:2第二台机器 不强悍 pcore: vcore=1:1
+
+假设这个集群有10个物理cpu，可以在yarn.nodemanager.resource.pcores-vcores-multiplie
+
+https://blog.csdn.net/helloxiaozhe/article/details/115795949?spm=1001.2101.3001.6650.1&utm_medium=distribute.pc_relevant.none-task-blog-2%7Edefault%7ECTRLIST%7Edefault-1-115795949-blog-83245090.pc_relevant_multi_platform_whitelistv2&depth_1-utm_source=distribute.pc_relevant.none-task-blog-2%7Edefault%7ECTRLIST%7Edefault-1-115795949-blog-83245090.pc_relevant_multi_platform_whitelistv2&utm_relevant_index=1
 
 ## spark rdd存储级别
 
@@ -323,300 +333,362 @@ class HashPartitioner(partitions: Int) extends Partitioner {
 
 就是拿到key，计算hash值，返回一个（0，numPartitions-1）的值。
 
-## spark内存管理
+## spark存储
 
 https://blog.coderap.com/article/301
 
+http://arganzheng.life/spark-executor-memory-management.html
+
 Spark中数据的存储按照位置来分，可以分为磁盘和内存，存储体系也分别根据这两种存储位置做出了不同的实现；同时，存储层还有一项非常重要的工作，就是对这两种存储进行管理。
 
-磁盘存储：
+### 1)磁盘存储
 
 * DiskBlockManager：主要负责建立逻辑上的数据块与该数据块在磁盘上的写入位置之间的映射关系
 * DiskStore：负责数据块在磁盘上的进行存储的具体实现方式，比如实现了在磁盘上保存block的逻辑。
 
-内存存储：
+### 2)内存存储
 
-* MemoryPool：用于实现对操作系统分配给Spark的物理内存的逻辑规划，协助Spark管理可调节的内存区域
+#### 2.1 内存池
 
-  * `_poolSize`字段用于表示内存池的总大小（以字节为单位），线程安全
+MemoryPool：用于实现对操作系统分配给Spark的物理内存的逻辑规划，协助Spark管理可调节的内存区域
 
-  * ExecutionMemoryPool：MemoryPool的实现类，执行内存池，执行各种存储操作。执行内存池的分配和管理，它用于保证Task合理地进行内存使用，避免由于某些Task过度使用内存导致其它的Task频繁将数据溢写到磁盘。会根据Task的数量来动态控制每个Task所能申请的用于执行操作的内存大小范围。跟踪所有激活的Task的数量以便动态更新总内存的1 / 2N ~ 1 / N范围值【N为task个数】。
-    * MemoryMode类型的参数`memoryMode`，MemoryMode是枚举类ON_HEAP和OFF_HEAP两种内存模式，分别表示堆内存模式和堆外内存模式。MemoryMode主要决定在JVM堆上还是JVM的堆外内存（操作系统内存）中。
-    * HashMap[Long, Long]类型的字典`memoryForTask`记录每个TaskAttempt的ID与其所使用的执行内存的大小之间的映射关系
-    * 申请内存方法【为一个task(taskAttemptId)申请numBytes字节的内存】：private[memory] def acquireMemory(numBytes: Long, taskAttemptId: Long,maybeGrowPool: Long => Unit = (additionalSpaceNeeded: Long) => Unit，computeMaxPoolSize: () => Long = () => poolSize)
-    * 释放内存方法【为一个task(taskAttemptId)释放numBytes字节的内存】。   releaseMemory(numBytes**:** **Long**, taskAttemptId**:** **Long**)**:** **Unit**
-  * StorageMemoryPool：MemoryPool的实现类，用于存储
-    * 同样有个MemoryMode类型的参数`memoryMode`
-    * 它提供了`_memoryUsed`字段用于表示已经使用的内存大小
-    * MemoryStore类型的字段`_memoryStore`及其Getter和Setter方法，用于实现数据块在内存中的存储
-    * 申请释放内存的方法
+**记录内存的使用信息，定义了一些申请内存的操作，本身的size有上限**
 
-  * 目前看，两者侧重点不同，ExecutionMemoryPool负责记录每个Task及其内存使用信息；StorageMemoryPool记录BlockId(和一个文件关联)及其内存信息；前者为计算过程提供内存，后者为计算提供内存。
+* `_poolSize`字段用于表示内存池的总大小（以字节为单位），线程安全
 
-* MemoryManager：内存管理器。负责协调内存存储各类组件的相互协作，有静态内存管理器和统一内存管理器两种实现，对应于StaticMemoryManager和UnifiedMemoryManager两个实现类；前者对执行内存和存储内存的比例控制是固定的，后者则实现了动态比例划分。
+* ExecutionMemoryPool：MemoryPool的实现类，执行内存池，执行各种存储操作。执行内存池的分配和管理，它用于保证Task合理地进行内存使用，避免由于某些Task过度使用内存导致其它的Task频繁将数据溢写到磁盘。会根据Task的数量来动态控制每个Task所能申请的用于执行操作的内存大小范围。跟踪所有激活的Task的数量以便动态更新总内存的1 / 2N ~ 1 / N范围值【N为task个数】。
+  * MemoryMode类型的参数`memoryMode`，MemoryMode是枚举类ON_HEAP和OFF_HEAP两种内存模式，分别表示堆内存模式和堆外内存模式。MemoryMode主要决定在JVM堆上还是JVM的堆外内存（操作系统内存）中。
+  * HashMap[Long, Long]类型的字典`memoryForTask`记录每个TaskAttempt的ID与其所使用的执行内存的大小之间的映射关系
+  * 申请内存方法【为一个task(taskAttemptId)申请numBytes字节的内存】：private[memory] def acquireMemory(numBytes: Long, taskAttemptId: Long,maybeGrowPool: Long => Unit = (additionalSpaceNeeded: Long) => Unit，computeMaxPoolSize: () => Long = () => poolSize)
+  * 释放内存方法【为一个task(taskAttemptId)释放numBytes字节的内存】。   releaseMemory(numBytes**:** **Long**, taskAttemptId**:** **Long**)**:** **Unit**
+* StorageMemoryPool：MemoryPool的实现类，用于存储
+  * 同样有个MemoryMode类型的参数`memoryMode`
+  * 它提供了`_memoryUsed`字段用于表示已经使用的内存大小
+  * MemoryStore类型的字段`_memoryStore`及其Getter和Setter方法，用于实现数据块在内存中的存储
+  * 申请释放内存的方法
 
-  MemoryManager在申请内存时会按照申请的是执行/存储内存以及是否在堆上委托不同的内存池申请内存
+* 目前看，两者侧重点不同，ExecutionMemoryPool负责记录每个Task及其内存使用信息；StorageMemoryPool记录BlockId(和一个文件关联)及其内存信息；前者为计算过程提供内存，后者为计算提供内存。
 
-  * 内部持有堆内/堆外的ExecutionMemoryPool/StorageMemoryPool四个成员
+#### 2.2 MemoryManager
 
-  * Tungsten存储：是Spark中致力于提升Spark程序对内存和CPU的利用率，优化硬件性能的项目。MemoryManager的`tungstenMemoryMode`字段指定了Tungsten的存储模式：如果enable了堆外内存并且spark.memory.offHeap.size大于0的话，tungstenMemoryMode就是MemoryMode.OFF_HEAP,否则就是MemoryMode.ON_HEAP
+**划定不同内存池之间的边界，明确什么场景使用哪种类型的内存池（堆or堆外的storage/execution），将一些申请释放内存的操作委托给不同内存池执行**
 
-  * 两个工具类：MemoryLocation(获取对象在java堆中/堆外内存中的位置offset)；MemoryBlock在MemoryLocation上加上length字段，作为Tungsten对数据进行存储的载体
+MemoryManager：内存管理器。负责协调内存存储各类组件的相互协作，有静态内存管理器和统一内存管理器两种实现，对应于StaticMemoryManager和UnifiedMemoryManager两个实现类；前者对执行内存和存储内存的比例控制是固定的，后者则实现了动态比例划分。
 
-  * Tungsten定义了堆内内存和堆外内存的分配器HeapMemoryAllocator及UnsafeMemoryAllocator
+MemoryManager在申请内存时会按照申请的是执行/存储内存以及是否在堆上委托不同的内存池申请内存
 
-    * HeapMemoryAllocator的allocate方法在堆上分配size大小内存的对象，其中使用了“池化链”字典来优化，先在“池化链”字典找到合适的MemoryBlock，找不到再new一个，尽可能避免频繁创建MemoryBlock带来的性能损坏。返回一个MemoryBlock。
+* 内部持有堆内/堆外的ExecutionMemoryPool/StorageMemoryPool四个成员
 
-      ```java
-        public MemoryBlock allocate(long size) throws OutOfMemoryError {
-          if (shouldPool(size)) {
-            synchronized (this) {
-              final LinkedList<WeakReference<MemoryBlock>> pool = bufferPoolsBySize.get(size);//池化链
-              if (pool != null) {
-                while (!pool.isEmpty()) {
-                  final WeakReference<MemoryBlock> blockReference = pool.pop();
-                  final MemoryBlock memory = blockReference.get();
-                  if (memory != null) {
-                    assert (memory.size() == size);
-                    return memory;
-                  }
+* Tungsten存储：是Spark中致力于提升Spark程序对内存和CPU的利用率，优化硬件性能的项目。MemoryManager的`tungstenMemoryMode`字段指定了Tungsten的存储模式：如果enable了堆外内存并且spark.memory.offHeap.size大于0的话，tungstenMemoryMode就是MemoryMode.OFF_HEAP,否则就是MemoryMode.ON_HEAP
+
+* 两个工具类：MemoryLocation(获取对象在java堆中/堆外内存中的位置offset)；MemoryBlock在MemoryLocation上加上length字段，作为Tungsten对数据进行存储的载体
+
+* Tungsten定义了堆内内存和堆外内存的分配器HeapMemoryAllocator及UnsafeMemoryAllocator
+
+  * HeapMemoryAllocator的allocate方法在堆上分配size大小内存的对象，其中使用了“池化链”字典来优化，先在“池化链”字典找到合适的MemoryBlock，找不到再new一个，尽可能避免频繁创建MemoryBlock带来的性能损坏。返回一个MemoryBlock。
+
+    ```java
+      public MemoryBlock allocate(long size) throws OutOfMemoryError {
+        if (shouldPool(size)) {
+          synchronized (this) {
+            final LinkedList<WeakReference<MemoryBlock>> pool = bufferPoolsBySize.get(size);//池化链
+            if (pool != null) {
+              while (!pool.isEmpty()) {
+                final WeakReference<MemoryBlock> blockReference = pool.pop();
+                final MemoryBlock memory = blockReference.get();
+                if (memory != null) {
+                  assert (memory.size() == size);
+                  return memory;
                 }
-                bufferPoolsBySize.remove(size);
               }
+              bufferPoolsBySize.remove(size);
             }
           }
-          long[] array = new long[(int) ((size + 7) / 8)];//new了一个数组，作为MemoryBlock的obj
-          MemoryBlock memory = new MemoryBlock(array, Platform.LONG_ARRAY_OFFSET, size);//
-          if (MemoryAllocator.MEMORY_DEBUG_FILL_ENABLED) {
-            memory.fill(MemoryAllocator.MEMORY_DEBUG_FILL_CLEAN_VALUE);
-          }
-          return memory;
         }
-      ```
-
-      
-
-    * UnsafeMemoryAllocator的分配内存方法委托了Platform类，Platform的allocateMemory()方法实际代理了sun.misc. Unsafe 的allocateMemory()方法，sun.misc.Unsafe的allocateMemory()方法将返回分配的内存地址。
-
-      ```java
-        public MemoryBlock allocate(long size) throws OutOfMemoryError {
-          long address = Platform.allocateMemory(size);//通过unsafe申请堆外内存
-          MemoryBlock memory = new MemoryBlock(null, address, size);//
-          if (MemoryAllocator.MEMORY_DEBUG_FILL_ENABLED) {
-            memory.fill(MemoryAllocator.MEMORY_DEBUG_FILL_CLEAN_VALUE);
-          }
-          return memory;
+        long[] array = new long[(int) ((size + 7) / 8)];//new了一个数组，作为MemoryBlock的obj
+        MemoryBlock memory = new MemoryBlock(array, Platform.LONG_ARRAY_OFFSET, size);//
+        if (MemoryAllocator.MEMORY_DEBUG_FILL_ENABLED) {
+          memory.fill(MemoryAllocator.MEMORY_DEBUG_FILL_CLEAN_VALUE);
         }
-      ```
-
-      
-
-  * StaticMemoryManager：StaticMemoryManager是不支持将**堆外内存用于存储**，但是支持将堆外内存用于执行
-
-    ```
-    //可以看出，StaticMemoryManager直接把堆外内存池设成0了
-    offHeapExecutionMemoryPool.incrementPoolSize(offHeapStorageMemoryPool.poolSize)
-    offHeapStorageMemoryPool.decrementPoolSize(offHeapStorageMemoryPool.poolSize)
+        return memory;
+      }
     ```
 
     
 
-    ![2.StaticMemoryManager堆内存划分.png](spark知识点.assets/8etjVgSeiWszsXzdsudpdHbJWV1Vofnrphw7IE9mFkzLyk7KbSl5sFNtEgIDnwcu.png)
+  * UnsafeMemoryAllocator的分配内存方法委托了Platform类，Platform的allocateMemory()方法实际代理了sun.misc. Unsafe 的allocateMemory()方法，sun.misc.Unsafe的allocateMemory()方法将返回分配的内存地址。
+
+    ```java
+      public MemoryBlock allocate(long size) throws OutOfMemoryError {
+        long address = Platform.allocateMemory(size);//通过unsafe申请堆外内存
+        MemoryBlock memory = new MemoryBlock(null, address, size);//
+        if (MemoryAllocator.MEMORY_DEBUG_FILL_ENABLED) {
+          memory.fill(MemoryAllocator.MEMORY_DEBUG_FILL_CLEAN_VALUE);
+        }
+        return memory;
+      }
+    ```
 
     
 
-    可以使用StaticMemoryManager申请存储内存、展开存储内存【存储内存的一部分，堆内存池里存储内存安全区域用于Unroll操作的最大内存比例】和执行内存：
+* StaticMemoryManager：StaticMemoryManager是不支持将**堆外内存用于存储**，但是支持将堆外内存用于执行
 
-    * 伴生对象会读取配置计算出最大可用执行内存【getMaxExecutionMemory】和最大可用存储内存【getMaxStorageMemory】作为StaticMemoryManager的成员
-    * 申请存储内存时需要先检查MemoryMode，如果申请堆外存储内存直接报错，然后保证申请的内存不要超过最大可用存储内存。
-    * 申请执行内存时按照堆内/堆外委托不同的内存池申请
+  ```
+  //可以看出，StaticMemoryManager直接把堆外内存池设成0了
+  offHeapExecutionMemoryPool.incrementPoolSize(offHeapStorageMemoryPool.poolSize)
+  offHeapStorageMemoryPool.decrementPoolSize(offHeapStorageMemoryPool.poolSize)
+  ```
 
-  * UnifiedMemoryManager：将执行内存和存储内存之间的边界修改为“软”边界，即任何一方可以向另一方借用空闲的内存。
+  
 
-    ```scala
-      //初始化UnifiedMemoryManager:调用伴随对象的apply
-    def apply(conf: SparkConf, numCores: Int): UnifiedMemoryManager = {
-        val maxMemory = getMaxMemory(conf)
-        new UnifiedMemoryManager(
-          conf,
-          maxHeapMemory = maxMemory,
-          onHeapStorageRegionSize =
-            (maxMemory * conf.getDouble("spark.memory.storageFraction", 0.5)).toLong,
-          numCores = numCores)
-      }
-    //getMaxMemory方法
-      private def getMaxMemory(conf: SparkConf): Long = {
-        val systemMemory = conf.getLong("spark.testing.memory", Runtime.getRuntime.maxMemory)
-        //Runtime.getRuntime.maxMemory是jvm可尝试使用的最大堆内存，即xmx减去一个suvivor的大小
-        val reservedMemory = conf.getLong("spark.testing.reservedMemory",
-          if (conf.contains("spark.testing")) 0 else RESERVED_SYSTEM_MEMORY_BYTES)
-          //取决于spark.testing.reservedMemory、spark.testing和300mb
-        val minSystemMemory = (reservedMemory * 1.5).ceil.toLong
-        if (systemMemory < minSystemMemory) {
-          throw new IllegalArgumentException(s"System memory $systemMemory must " +
-            s"be at least $minSystemMemory. Please increase heap size using the --driver-memory " +
-            s"option or spark.driver.memory in Spark configuration.")
-        }
-        // SPARK-12759 Check executor memory to fail fast if memory is insufficient
-        if (conf.contains("spark.executor.memory")) {
-          val executorMemory = conf.getSizeAsBytes("spark.executor.memory")
-          if (executorMemory < minSystemMemory) {
-            throw new IllegalArgumentException(s"Executor memory $executorMemory must be at least " +
-              s"$minSystemMemory. Please increase executor memory using the " +
-              s"--executor-memory option or spark.executor.memory in Spark configuration.")
-          }
-        }
-        val usableMemory = systemMemory - reservedMemory//系统内存
-        val memoryFraction = conf.getDouble("spark.memory.fraction", 0.6)
-        (usableMemory * memoryFraction).toLong
-      }
-    //初始化UnifiedMemoryManager对象
-    private[spark] class UnifiedMemoryManager private[memory] (
-        conf: SparkConf,
-        val maxHeapMemory: Long,//最大内存
-        onHeapStorageRegionSize: Long,//用于存储区域的内存
-        numCores: Int)
-      extends MemoryManager(
+  ![2.StaticMemoryManager堆内存划分.png](spark知识点.assets/8etjVgSeiWszsXzdsudpdHbJWV1Vofnrphw7IE9mFkzLyk7KbSl5sFNtEgIDnwcu.png)
+
+  
+
+  可以使用StaticMemoryManager申请存储内存、展开存储内存【存储内存的一部分，堆内存池里存储内存安全区域用于Unroll操作的最大内存比例】和执行内存：
+
+  * 伴生对象会读取配置计算出最大可用执行内存【getMaxExecutionMemory】和最大可用存储内存【getMaxStorageMemory】作为StaticMemoryManager的成员
+  * 申请存储内存时需要先检查MemoryMode，如果申请堆外存储内存直接报错，然后保证申请的内存不要超过最大可用存储内存。
+  * 申请执行内存时按照堆内/堆外委托不同的内存池申请
+
+* UnifiedMemoryManager：将执行内存和存储内存之间的边界修改为“软”边界，即任何一方可以向另一方借用空闲的内存。
+
+  ```scala
+    //初始化UnifiedMemoryManager:调用伴随对象的apply
+  def apply(conf: SparkConf, numCores: Int): UnifiedMemoryManager = {
+      val maxMemory = getMaxMemory(conf)
+      new UnifiedMemoryManager(
         conf,
-        numCores,
-        onHeapStorageRegionSize,
-        maxHeapMemory - onHeapStorageRegionSize) 
-    ```
-    
-    **【猜想】这里虽然系统内存是由Runtime.getRuntime.maxMemory决定的，但是实际这个函数的返回结果很有可能就是spark.executor.memory**
-    
-    spark.executor.memoryOverhead：executor上每个进程分配的额外内存，https://spark.apache.org/docs/latest/configuration.html，它在堆外。spark3之后，The maximum memory size of container to running executor is determined by the sum of `spark.executor.memoryOverhead`, `spark.executor.memory`, `spark.memory.offHeap.size` and `spark.executor.pyspark.memory`.
-    
-    spark.memory.offHeap.size和spark.executor.memoryOverhead有什么区别？
-    
-    https://stackoverflow.com/questions/58666517/difference-between-spark-yarn-executor-memoryoverhead-and-spark-memory-offhea
-    
-    前者是被spark内核使用的，yarn的rm不知道这部分资源；后者是被rm知道的
-    
-    Spark2.4.5之前：spark.memory.offHeap.size这部分内存需要手动加到yarn的memoryOverhead里让yarn分配：
-    
-    这个在YarnAllocator.scala中表明了，yarn分配的资源只包括executorMemory【spark.executor.memory】和memoryOverhead 【spark.executor.memoryOverhead】两部分指定的数据。
-    
-    ```scala
-      private[yarn] val resource = if (gpuResource.size > 0) {
-        logInfo(s"Resource with gpuResource map: $gpuResource")
-        Resource.newInstance(executorMemory + memoryOverhead, executorCores,
-          gpuResource.asJava)
-      } else {
-        Resource.newInstance(executorMemory + memoryOverhead, executorCores,
-          executorGCores)
+        maxHeapMemory = maxMemory,
+        onHeapStorageRegionSize =
+          (maxMemory * conf.getDouble("spark.memory.storageFraction", 0.5)).toLong,
+        numCores = numCores)
+    }
+  //getMaxMemory方法
+    private def getMaxMemory(conf: SparkConf): Long = {
+      val systemMemory = conf.getLong("spark.testing.memory", Runtime.getRuntime.maxMemory)
+      //Runtime.getRuntime.maxMemory是jvm可尝试使用的最大堆内存，即xmx减去一个suvivor的大小
+      val reservedMemory = conf.getLong("spark.testing.reservedMemory",
+        if (conf.contains("spark.testing")) 0 else RESERVED_SYSTEM_MEMORY_BYTES)
+        //取决于spark.testing.reservedMemory、spark.testing和300mb
+      val minSystemMemory = (reservedMemory * 1.5).ceil.toLong
+      if (systemMemory < minSystemMemory) {
+        throw new IllegalArgumentException(s"System memory $systemMemory must " +
+          s"be at least $minSystemMemory. Please increase heap size using the --driver-memory " +
+          s"option or spark.driver.memory in Spark configuration.")
       }
-    ```
-    
-    spark3以后：
-    
-    ```scala
-    private[yarn] val resource: Resource = {
-        val resource = Resource.newInstance(
-          executorMemory + executorOffHeapMemory + memoryOverhead + pysparkWorkerMemory, executorCores)
-        ResourceRequestHelper.setResourceRequests(executorResourceRequests, resource)
-        logDebug(s"Created resource capability: $resource")
-        resource
+      // SPARK-12759 Check executor memory to fail fast if memory is insufficient
+      if (conf.contains("spark.executor.memory")) {
+        val executorMemory = conf.getSizeAsBytes("spark.executor.memory")
+        if (executorMemory < minSystemMemory) {
+          throw new IllegalArgumentException(s"Executor memory $executorMemory must be at least " +
+            s"$minSystemMemory. Please increase executor memory using the " +
+            s"--executor-memory option or spark.executor.memory in Spark configuration.")
+        }
       }
-    ```
-    
-    https://github.com/apache/spark/pull/25309
-    
-    此时ym可以使用executorOffHeapMemory指定【spark.memory.offHeap.size】的数据，
-    
-    最终获取到的MemoryManager的内存结构为：
-    
-    * 系统内存
-      * usableMemory（系统内存-保留内存）
-        * spark.memory.fraction（用于执行+存储的堆内存）
-          * 存储占比(spark.memory.storageFraction)
-          * 执行占比
-        * 其他堆内存
-      * 保留内存
-    
-    用实际并而堆外内存走的是spark.memory.offHeap.size，并且按照spark.memory.storageFraction分配存储与计算
-    
-    最后在new MemoryManager时,它的目的有：
-    
-    1. 初始化四个内存池并指定大小
-    2. 这些内存池大小的计算，堆内存取决于具体MemoryManager实现类是怎么分配的，堆外统一在MemoryManager分配
-    
-    ```scala
-    private[spark] abstract class MemoryManager(
-        conf: SparkConf,
-        numCores: Int,
-        onHeapStorageMemory: Long
-        onHeapExecutionMemory: Long) extends Logging {
-    
-      // -- Methods related to memory allocation policies and bookkeeping ------------------------------
-    
-      @GuardedBy("this")
-      protected val onHeapStorageMemoryPool = new StorageMemoryPool(this, MemoryMode.ON_HEAP)
-      @GuardedBy("this")
-      protected val offHeapStorageMemoryPool = new StorageMemoryPool(this, MemoryMode.OFF_HEAP)
-      @GuardedBy("this")
-      protected val onHeapExecutionMemoryPool = new ExecutionMemoryPool(this, MemoryMode.ON_HEAP)
-      @GuardedBy("this")
-      protected val offHeapExecutionMemoryPool = new ExecutionMemoryPool(this, MemoryMode.OFF_HEAP)
-    
-      onHeapStorageMemoryPool.incrementPoolSize(onHeapStorageMemory)
-      onHeapExecutionMemoryPool.incrementPoolSize(onHeapExecutionMemory)
-    
-      protected[this] val maxOffHeapMemory = conf.getSizeAsBytes("spark.memory.offHeap.size", 0)
-      protected[this] val offHeapStorageMemory =
-        (maxOffHeapMemory * conf.getDouble("spark.memory.storageFraction", 0.5)).toLong
-    
-      offHeapExecutionMemoryPool.incrementPoolSize(maxOffHeapMemory - offHeapStorageMemory)
-      offHeapStorageMemoryPool.incrementPoolSize(offHeapStorageMemory)
-    ```
-    
-    
-    
-    ![3.UnifiedMemoryManager堆内存划分.png](spark知识点.assets/dUtzuWSNtPblCrP55R5tzHO8ub0h2KaOmSK13vibyLkXnp8h36pkk9rOQQkP1MZl.png)
-    
-    
-    
-    ![4.UnifiedMemoryManager堆外内存划分.png](spark知识点.assets/g2aE6PxFPHfhlxE5CTxVLpIBmIxJ4OX4rDnmVVC7LWuVzXsJGHcCW99mRuvVBMYj.png)
-    
-    UnifiedMemoryManager所管理的执行和存储两个内存区域的比例在初始时是确定的，即各占50%，但它们在作业运行期间是动态变化的，当申请执行内存时，发现执行内存不够用，则可以向存储内存区域借用一部分内存，同样的，当存储内存不够用时，如果执行内存有空闲，则可以向执行内存区域借用一部分内存；两个内存区域空间都不足时，则需要存储到磁盘。
-    
-    1. 执行内存区域被存储内存借用后，可让其将存储在占用部分的数据转储到硬盘，以归还借用的空间。
-    2. 存储内存区域被执行内存借用后，无法让对方归还空间，这是为了保证计算操作不会因为内存不足而OOM。
-    
-    ```scala
-     //	执行内存空间不足时从存储内存借或者要求其归还内存   
-    	def maybeGrowExecutionPool(extraMemoryNeeded: Long): Unit = {
-          if (extraMemoryNeeded > 0) {
-            // There is not enough free memory in the execution pool, so try to reclaim memory from
-            // storage. We can reclaim any free memory from the storage pool. If the storage pool
-            // has grown to become larger than `storageRegionSize`, we can evict blocks and reclaim
-            // the memory that storage has borrowed from execution.
-            val memoryReclaimableFromStorage = math.max(
-              storagePool.memoryFree,//storage空闲的内存
-              storagePool.poolSize - storageRegionSize)//storagePool当前大小减去标准大小，表示storagePool借的
-            if (memoryReclaimableFromStorage > 0) {
-              // Only reclaim as much space as is necessary and available:
-              val spaceToReclaim = storagePool.freeSpaceToShrinkPool(//让storagePool将一部分数据转储
-                math.min(extraMemoryNeeded, memoryReclaimableFromStorage))
-              storagePool.decrementPoolSize(spaceToReclaim)
-              executionPool.incrementPoolSize(spaceToReclaim)
-            }
+      val usableMemory = systemMemory - reservedMemory//系统内存
+      val memoryFraction = conf.getDouble("spark.memory.fraction", 0.6)
+      (usableMemory * memoryFraction).toLong
+    }
+  //初始化UnifiedMemoryManager对象
+  private[spark] class UnifiedMemoryManager private[memory] (
+      conf: SparkConf,
+      val maxHeapMemory: Long,//最大内存
+      onHeapStorageRegionSize: Long,//用于存储区域的内存
+      numCores: Int)
+    extends MemoryManager(
+      conf,
+      numCores,
+      onHeapStorageRegionSize,
+      maxHeapMemory - onHeapStorageRegionSize) 
+  ```
+  
+  **【猜想】这里虽然系统内存是由Runtime.getRuntime.maxMemory决定的，但是实际这个函数的返回结果很有可能就是spark.executor.memory**
+  
+  spark.executor.memoryOverhead：executor上每个进程分配的额外内存，https://spark.apache.org/docs/latest/configuration.html，它在堆外。spark3之后，The maximum memory size of container to running executor is determined by the sum of `spark.executor.memoryOverhead`, `spark.executor.memory`, `spark.memory.offHeap.size` and `spark.executor.pyspark.memory`.
+  
+  spark.memory.offHeap.size和spark.executor.memoryOverhead有什么区别？
+  
+  https://stackoverflow.com/questions/58666517/difference-between-spark-yarn-executor-memoryoverhead-and-spark-memory-offhea
+  
+  前者是被spark内核使用的，yarn的rm不知道这部分资源；后者是被rm知道的
+  
+  Spark2.4.5之前：spark.memory.offHeap.size这部分内存需要手动加到yarn的memoryOverhead里让yarn分配：
+  
+  这个在YarnAllocator.scala中表明了，yarn分配的资源只包括executorMemory【spark.executor.memory】和memoryOverhead 【spark.executor.memoryOverhead】两部分指定的数据。
+  
+  ```scala
+    private[yarn] val resource = if (gpuResource.size > 0) {
+      logInfo(s"Resource with gpuResource map: $gpuResource")
+      Resource.newInstance(executorMemory + memoryOverhead, executorCores,
+        gpuResource.asJava)
+    } else {
+      Resource.newInstance(executorMemory + memoryOverhead, executorCores,
+        executorGCores)
+    }
+  ```
+  
+  spark3以后：
+  
+  ```scala
+  private[yarn] val resource: Resource = {
+      val resource = Resource.newInstance(
+        executorMemory + executorOffHeapMemory + memoryOverhead + pysparkWorkerMemory, executorCores)
+      ResourceRequestHelper.setResourceRequests(executorResourceRequests, resource)
+      logDebug(s"Created resource capability: $resource")
+      resource
+    }
+  ```
+  
+  https://github.com/apache/spark/pull/25309
+  
+  此时ym可以使用executorOffHeapMemory指定【spark.memory.offHeap.size】的数据，
+  
+  最终获取到的MemoryManager的内存结构为：
+  
+  * 系统内存
+    * usableMemory（系统内存-保留内存）
+      * spark.memory.fraction（用于执行+存储的堆内存）
+        * 存储占比(spark.memory.storageFraction)
+        * 执行占比
+      * 其他堆内存
+    * 保留内存
+  
+  用实际并而堆外内存走的是spark.memory.offHeap.size，并且按照spark.memory.storageFraction分配存储与计算
+  
+  最后在new MemoryManager时,它的目的有：
+  
+  1. 初始化四个内存池并指定大小
+  2. 这些内存池大小的计算，堆内存取决于具体MemoryManager实现类是怎么分配的，堆外统一在MemoryManager分配
+  
+  ```scala
+  private[spark] abstract class MemoryManager(
+      conf: SparkConf,
+      numCores: Int,
+      onHeapStorageMemory: Long
+      onHeapExecutionMemory: Long) extends Logging {
+  
+    // -- Methods related to memory allocation policies and bookkeeping ------------------------------
+  
+    @GuardedBy("this")
+    protected val onHeapStorageMemoryPool = new StorageMemoryPool(this, MemoryMode.ON_HEAP)
+    @GuardedBy("this")
+    protected val offHeapStorageMemoryPool = new StorageMemoryPool(this, MemoryMode.OFF_HEAP)
+    @GuardedBy("this")
+    protected val onHeapExecutionMemoryPool = new ExecutionMemoryPool(this, MemoryMode.ON_HEAP)
+    @GuardedBy("this")
+    protected val offHeapExecutionMemoryPool = new ExecutionMemoryPool(this, MemoryMode.OFF_HEAP)
+  
+    onHeapStorageMemoryPool.incrementPoolSize(onHeapStorageMemory)
+    onHeapExecutionMemoryPool.incrementPoolSize(onHeapExecutionMemory)
+  
+    protected[this] val maxOffHeapMemory = conf.getSizeAsBytes("spark.memory.offHeap.size", 0)
+    protected[this] val offHeapStorageMemory =
+      (maxOffHeapMemory * conf.getDouble("spark.memory.storageFraction", 0.5)).toLong
+  
+    offHeapExecutionMemoryPool.incrementPoolSize(maxOffHeapMemory - offHeapStorageMemory)
+    offHeapStorageMemoryPool.incrementPoolSize(offHeapStorageMemory)
+  ```
+  
+  
+  
+  ![3.UnifiedMemoryManager堆内存划分.png](spark知识点.assets/dUtzuWSNtPblCrP55R5tzHO8ub0h2KaOmSK13vibyLkXnp8h36pkk9rOQQkP1MZl.png)
+  
+  
+  
+  ![4.UnifiedMemoryManager堆外内存划分.png](spark知识点.assets/g2aE6PxFPHfhlxE5CTxVLpIBmIxJ4OX4rDnmVVC7LWuVzXsJGHcCW99mRuvVBMYj.png)
+  
+  UnifiedMemoryManager所管理的执行和存储两个内存区域的比例在初始时是确定的，即各占50%，但它们在作业运行期间是动态变化的，当申请执行内存时，发现执行内存不够用，则可以向存储内存区域借用一部分内存，同样的，当存储内存不够用时，如果执行内存有空闲，则可以向执行内存区域借用一部分内存；两个内存区域空间都不足时，则需要存储到磁盘。
+  
+  1. 执行内存区域被存储内存借用后，可让其将存储在占用部分的数据转储到硬盘，以归还借用的空间。
+  2. 存储内存区域被执行内存借用后，无法让对方归还空间，这是为了保证计算操作不会因为内存不足而OOM。
+  
+  ```scala
+   //	执行内存空间不足时从存储内存借或者要求其归还内存   
+  	def maybeGrowExecutionPool(extraMemoryNeeded: Long): Unit = {
+        if (extraMemoryNeeded > 0) {
+          // There is not enough free memory in the execution pool, so try to reclaim memory from
+          // storage. We can reclaim any free memory from the storage pool. If the storage pool
+          // has grown to become larger than `storageRegionSize`, we can evict blocks and reclaim
+          // the memory that storage has borrowed from execution.
+          val memoryReclaimableFromStorage = math.max(
+            storagePool.memoryFree,//storage空闲的内存
+            storagePool.poolSize - storageRegionSize)//storagePool当前大小减去标准大小，表示storagePool借的
+          if (memoryReclaimableFromStorage > 0) {
+            // Only reclaim as much space as is necessary and available:
+            val spaceToReclaim = storagePool.freeSpaceToShrinkPool(//让storagePool将一部分数据转储
+              math.min(extraMemoryNeeded, memoryReclaimableFromStorage))
+            storagePool.decrementPoolSize(spaceToReclaim)
+            executionPool.incrementPoolSize(spaceToReclaim)
           }
         }
-    //这个代码的神奇之处在于当storagePool刚好占50%时，executionPool拿不到内存
-    ```
-    
-    
+      }
+  //这个代码的神奇之处在于当storagePool刚好占50%时，executionPool拿不到内存
+  ```
+  
+  
 
-* MemoryEntry：数据块的内存抽象。数据块存储在内存中的具体表现形式。
+#### 2.3 MemoryEntry
 
-* MemoryStore：内存存储的具体执行类。它是执行各类内存存储操作的主要实现类。
+MemoryEntry：内存中对block的抽象，一个MemoryEntry对应一个block
+
+```scala
+private sealed trait MemoryEntry[T] {
+  def size: Long
+  def memoryMode: MemoryMode
+  def classTag: ClassTag[T]
+}
+private case class DeserializedMemoryEntry[T](
+    value: Array[T],
+    size: Long,
+    classTag: ClassTag[T]) extends MemoryEntry[T] {
+  val memoryMode: MemoryMode = MemoryMode.ON_HEAP
+}
+private case class SerializedMemoryEntry[T](
+    buffer: ChunkedByteBuffer,
+    memoryMode: MemoryMode,
+    classTag: ClassTag[T]) extends MemoryEntry[T] {
+  def size: Long = buffer.size
+}
+```
+
+其中value: Array[T]和buffer: ChunkedByteBuffer是实际保存block数据的地方。
+
+#### 2.4 MemoryStore
+
+MemoryStore：内存存储的具体执行类，负责将block存储到内存。
+
+几个成员
+
+```scala
+  // 记录blockid和MemoryEntry的关系
+  private val entries = new LinkedHashMap[BlockId, MemoryEntry[_]](32, 0.75f, true)
+
+  // A mapping from taskAttemptId to amount of memory used for unrolling a block (in bytes)
+  // All accesses of this map are assumed to have manually synchronized on `memoryManager`
+  private val onHeapUnrollMemoryMap = mutable.HashMap[Long, Long]()
+  // Note: off-heap unroll memory is only used in putIteratorAsBytes() because off-heap caching
+  // always stores serialized values.
+  private val offHeapUnrollMemoryMap = mutable.HashMap[Long, Long]()
+```
+
+unroll a block是什么意思？展开block类似占座，为每个taskattempt预留出部分内存让其写入block，以防真正写入的时候没有内存了。
+
+几个值得关注的方法：
+
+* putBytes(blockid,size)：为这个blockid申请size大小的存储内存，然后为这个blockid生成一个SerializedMemoryEntry，把blockid记录到entries
+* private[storage] def putIteratorAsValues[T\](blockId: BlockId,values: Iterator[T],classTag: ClassTag[T])有时block太大，一次性以一个字节数组的方式放到内存容易mom，所以有时候会把block数据转成Iterator，然后用putIteratorAsValues把这个blockid及其数据values放到内存中。大致逻辑是：通过迭代器写入block数据，记录写入数据的总大小并检查当前unrolling内存够不够，如果够的话就把数据以DeserializedMemoryEntry的形式保存在内存里【把迭代器展开了】，否则还是以迭代器形式保存在内存里。
+
+
 
 https://www.cnblogs.com/johnny666888/p/11277947.html
+
+### 3)任务内存
 
 TaskmemoryManager：供不同消费者申请内存的组件
 
 ```java
+//TaskmemoryManager的成员变量
 private final MemoryBlock[] pageTable = new MemoryBlock[PAGE_TABLE_SIZE];//PAGE_TABLE_SIZE=2^13
 private final HashSet<MemoryConsumer> consumers;//维护所有向他申请内存的消费者记录
 private final MemoryManager memoryManager;//这个TaskmemoryManager所委托的MemoryManager
@@ -844,15 +916,28 @@ TaskmemoryManager申请内存的方法：
 
 
 
+## Spark任务提交
 
+https://developer.aliyun.com/article/74944
 
+SparkSubmit的main方法会获得用户的main class，通过反射调用用户类的main方法
 
+用户代码初始化sparkcontext.
 
+SparkContext的构造方法主要干三件事，创建了一个SparkEnv，taskScheduler，dagScheduler.
 
+## spark计算引擎
 
+### 1 spark shuffle特点
 
+早期shuffle两大特点：
 
+1. 一个map task为每个reduce task产生一个bucket，一共m \* R个bucket	
+2. maptask将处理的数据一次性写入到内存中，然后保存到磁盘形成文件
 
+ß
+
+## 
 
 
 

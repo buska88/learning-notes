@@ -433,13 +433,22 @@ sql语句——>ParserDriver 中通过调用语法分析器中的 singleStatemen
 Catalyst中的数据结构：
 
 * InternalRow：就是用来表示一行行数据的类，表征关系表中的一行。
-
 * TreeNode：树结构基类，表征逻辑/物理算子树的节点,有两大类子类：
 
   * QueryPlan：包含逻辑算子树( LogicalPlan)和物理执行 算子树( SparkPlan)两个重要 的子类
   * Expression：表达式一般指的是不需要触发执行引擎而能够直接进行计算的单元，例如加减乘除四则运算、逻辑操作、转换操作、过滤操作等。在 Expression类中，主要定义了 5个方面的操作，包括基本属性、核心操作、输入输出、字符串表示和等价性判断。算子执行前通常都会进行“绑定”操作，将表达式与输入的属性对应起来，同时算子也能够调用各种表达式处理相应的逻辑
 
-  
+
+```
+TreeNode
+|----QueryPlan
+|				|---LogicalPlan
+|       |---SparkPlan
+|
+|---Expression
+```
+
+
 
 Spark sql数据类型：全部继承自Abstract­DataType 类型
 
@@ -452,7 +461,7 @@ ANTLR (Another Tool for Language Recognition)是目前非常活跃的语法生�
 ANTLR构建方法：
 
 * 词法和语法可以放在同一个文件中，后缀为g4
-* 在命令行下或 MAVEN 中调用 ANTLR4 生成相应的 代码
+* 在命令行下或 MAVEN 中调用 ANTLR4 生成相应的代码
 * 开发人员在生成的代码中实现语法树遍历过程中的核心逻辑即可
 
 访问者模式：一种遍历语法树的方式，将算法与对象结构分离的软件设计模式 。例子，假设要游客visitor访问城市，这里游客的访问逻辑是visit(算法)，城市是对象结构，在visit中定义具体的访问行为，在对象结构中实现accept方法，接受访问者对象visitor，调用visit：
@@ -521,19 +530,86 @@ https://docs.pingcap.com/zh/tidb/stable/sql-optimization-concepts
 
 ## 3逻辑计划
 
+https://www.modb.pro/db/107229
+
 ![image-20220612144811432](Spark sql.assets/image-20220612144811432.png)
 
 
 
-* 由 SparkSq!Parser 中的 AstBuilder执行节点访问，将语法树的各利I Context节点转换成对应的 LogicalPlan 节点，从而成为 一棵未解析的逻辑算子树(Unresolved LogicalPlan
-* 由 Analyzer将一系列的规则作用在 Unresolved LogicalPlan 上，对树上的节点绑定各种数据信息，生成解析后的逻辑算子树( Analyzed LogicalPlan)
-* 由 SparkSQL中的优化器(Optimizer)将一系列优化规则作用到上一步生成的逻辑子树中，在确保结果正确的前提下改写其中的低效结构，生成优化后的逻辑算子树( OptimizedLogica!Plan)
+
 
 ### 3.1 logicplan
 
-logicplan继承了queryplan，queryplan又继承了treenode，每个logicplan也有子节点这一概念.实际logicplan可分为叶子结点类型、单子节点、双子节点类型。
+Spark SQL中的Parser组件检查SQL语法上是否有问题，然后生成Unresolved（未决断）的逻辑计划。这也是逻辑执行计划的第一个版本。之所以叫做Unresolved逻辑执行计划，因为SQL语法可能是正确的，但有一些表名或者列名不存在。这一步是不检查表名、不检查列名的。
 
-下面是一个sql语句和它对应的抽象语法树，singlestatementContext为根节点，fromClausecontext是from子句生成的抽象节点树，Queq句 ecificationContext 节点， 一 般将数据表和具体的查询表达式整合在一起，QueryOrganizationContext 为根节点所代表的子树中包含了各种对数据组织的操作，例如 Sort、 Limit和 Window算子等
+我们在spark ui上常看见的那种filter、project、join等算子都是logicplan类型。
+
+logicplan分为3种类型：没有子节点(LeafNode)、一个子节点(UnaryNode)、两个子节点(BinaryNode)
+
+生成logicplan：ParseDriver.scala中的CatalystSqlParser的parsePlan方法解析sql语句,这里调用的是cury化函数，parse第一个参数是sql语句，第二个参数是一个方法，该方法执行语法解析器的singleStatement方法并把结果作为astBuilder.visitSingleStatement的参数。
+
+
+
+```scala
+ //parsePlan
+override def parsePlan(sqlText: String): LogicalPlan = parse(sqlText) { parser =>
+    astBuilder.visitSingleStatement(parser.singleStatement()) match {
+      case plan: LogicalPlan => plan
+      case _ =>
+        val position = Origin(None, None)
+        throw new ParseException(Option(sqlText), "Unsupported SQL statement", position, position)
+    }
+  }
+==========================
+  protected def parse[T](command: String)(toResult: SqlBaseParser => T): T = {
+    logInfo(s"Parsing command: $command")
+
+    val lexer = new SqlBaseLexer(new ANTLRNoCaseStringStream(command))//生成词法解析器
+    lexer.removeErrorListeners()
+    lexer.addErrorListener(ParseErrorListener)
+
+    val tokenStream = new CommonTokenStream(lexer)
+    val parser = new SqlBaseParser(tokenStream)//生成语法解析器
+    parser.addParseListener(PostProcessor)
+    parser.removeErrorListeners()
+    parser.addErrorListener(ParseErrorListener)
+
+    try {
+      try {
+        // first, try parsing with potentially faster SLL mode
+        parser.getInterpreter.setPredictionMode(PredictionMode.SLL)
+        toResult(parser)
+      }
+      catch {
+        case e: ParseCancellationException =>
+          // if we fail, parse with LL mode
+          tokenStream.reset() // rewind input stream
+          parser.reset()
+
+          // Try Again.
+          parser.getInterpreter.setPredictionMode(PredictionMode.LL)
+          toResult(parser)
+      }
+    }
+    catch {
+      case e: ParseException if e.command.isDefined =>
+        throw e
+      case e: ParseException =>
+        throw e.withCommand(command)
+      case e: AnalysisException =>
+        val position = Origin(e.line, e.startPosition)
+        throw new ParseException(Option(command), e.message, position, position)
+    }
+  }
+}
+=====================
+//visitSingleStatement使用了访问者模式，astBuilder实现visit逻辑;ctx.statement是RuleContext类型，它的accept方法最终调研artbulder的visitChildren方法访问抽象语法树的子节点
+  override def visitSingleStatement(ctx: SingleStatementContext): LogicalPlan = withOrigin(ctx) {
+    visit(ctx.statement).asInstanceOf[LogicalPlan]
+  }
+```
+
+parser.singleStatement()会生成以singlestatementContext为根节点的抽象语法树，比如下面这个sql会形成这样的语法树：
 
 <img src="Spark sql.assets/image-20220612154939329.png" alt="image-20220612154939329" style="zoom:50%;" />
 
@@ -541,96 +617,20 @@ logicplan继承了queryplan，queryplan又继承了treenode，每个logicplan也
 
 
 
-生成logicplan：访问context的过程中返回Logicplan,，访问ctx过程中根据where子句生成withFilter这个logicplan，后面又创造了withDistinct、withWindow等logicplan。逐步向下递归调用，直到访问某个子 节点时能够构造 LogicalPlan，然后传递给父节点，因此返回的结果可以转换为 LogicalPlan类型。
-
-context除了可以被转化为LogicPlan外也可以被转化为expression，参见AstBuilder#expression。
-
-```scala
-  private def withSelectQuerySpecification(
-      ctx: ParserRuleContext,
-      selectClause: SelectClauseContext,
-      lateralView: java.util.List[LateralViewContext],
-      whereClause: WhereClauseContext,
-      aggregationClause: AggregationClauseContext,
-      havingClause: HavingClauseContext,
-      windowClause: WindowClauseContext,
-      relation: LogicalPlan): LogicalPlan = withOrigin(ctx) {
-    // Add lateral views.
-    val withLateralView = lateralView.asScala.foldLeft(relation)(withGenerate)
-
-    // Add where.
-    val withFilter = withLateralView.optionalMap(whereClause)(withWhereClause)
-
-    val expressions = visitNamedExpressionSeq(selectClause.namedExpressionSeq)
-    // Add aggregation or a project.
-    val namedExpressions = expressions.map {
-      case e: NamedExpression => e
-      case e: Expression => UnresolvedAlias(e)
-    }
-
-    def createProject() = if (namedExpressions.nonEmpty) {//头节点
-      Project(namedExpressions, withFilter)
-    } else {
-      withFilter
-    }
-
-    val withProject = if (aggregationClause == null && havingClause != null) {
-      // Treat HAVING without GROUP BY as WHERE. Try to fix in SPARK-25708
-      withHavingClause(havingClause, createProject())
-    } else if (aggregationClause != null) {
-      val aggregate = withAggregationClause(aggregationClause, namedExpressions, withFilter)
-      aggregate.optionalMap(havingClause)(withHavingClause)
-    } else {
-      // When hitting this branch, `having` must be null.
-      createProject()
-    }
-
-    // Distinct
-    val withDistinct = if (
-      selectClause.setQuantifier() != null &&
-        selectClause.setQuantifier().DISTINCT() != null) {
-      Distinct(withProject)
-    } else {
-      withProject
-    }
-
-    // Window，optionalMap方法是把一个logicplan映射为另一个logicplan。
-    val withWindow = withDistinct.optionalMap(windowClause)(withWindowClause)
-
-    // Hint
-    selectClause.hints.asScala.foldRight(withWindow)(withHints)
-  }
-```
-
-最后会形成一个logicplan的树：
-
-对于这样一个sql语句，最后会形成一个以上面代码Project 这个logicplan为头节点的unresolved tree。
-
-从上图可以见到where age > 18子句对应的logic plan ：withFilter,它是Filter类型
-
-```
-case class Filter(condition: Expression, child: LogicalPlan)
-  extends UnaryNode with PredicateHelper 
-```
-
-内部持有Expression类型的表达式condition。对应上图中的ComparisonContext。在生成condition时，当执行 visitColumnReference 时，会根据 ColumnReferenceContext 节点信息 生成 UnresolvedAttribute 表达式， 其中的常数18就是会统一封装为 Literal 表达式。在 visitPredicated 中会检查该谓词逻辑中是否包含 predicate语句(按照文法文件中的定义， predicate主要表示 BETWEEN-AND、 IN和 LIKE/RLIKE等语句)，这里的 SQL不包含 predicate，因此直接返回访问其子节点(visitComparison)得到的结果。 最终生成逻辑算子树 Filter节点的 condition构造参数 为 GreaterThan 表达式，其树型结构如下图 5.10 所示 。
-
-<img src="Spark sql.assets/image-20220612163717423.png" alt="image-20220612163717423" style="zoom:50%;" />
-
-<img src="Spark sql.assets/image-20220612163700085.png" alt="image-20220612163700085" style="zoom:50%;" />
+visitSingleStatement访问singlestatementContext，生成由logicplan组成的树。
 
 
-
-中间的project->Filter->UreolvedRelation对应的就是这个sql语句的unresolved tree
 
 ### 3.2 AnalyzedLogicalPlan生成
 
-UnresolvedLogicalPlan中有 UnresolvedRelation和 UnresolvedAttribute两种对象，UnresolvedRelation是一种logicplan；UnresolvedAttribute是一种expression。Analyzer所起到的主要作用就是将这两种节点或表达式解析成有类型的(Typed)对象，在此过程中，需要用到Catalog的相关信息。
+SparkSQL中的Analyzer组件会先分析之前生成的Unresolved逻辑执行计划，并通过访问Spark中的Catalog存储库来进行表名、列名的解析、验证。生成的Unresolved有 UnresolvedRelation【未解析的表名】和 UnresolvedAttribute【未解析的列名】两种对象
 
-* Catalog是一个宽泛的概念，通常可以理解为一个容器或数据库对象命名空间中的一个层次，主要用来解决命名冲突等问题。在 SparkSQL系统中， Catalog主要用于各种函数资源信息和元数据信息(数据库、数据表、数据视图、数据分区与函数等)的统一管理；一个 SparkSession对应一个 SessionCatalog。 本质上， SessionCatalog 起到了一个代理的作用，对底层的元数据信息、临时表信息、视图信息和函数信息进行了封装 。
-* 在 Unresolved LogicalPlan 逻辑算子树的操作(如绑定、解析、优化 等 )中，主要方法都是 基于规则( Rule)的，Rule是一个抽象类，子类需要复写 apply(plan: TreeType)方法来制定特定的处理逻辑
-* 有了各种具体规则后，还需要驱动程序来 调用这些规则，在 Catalyst 中这个功能由 RuleExecutor提供 。RuleExecutor 内部提供了 一个 Seq[Batch]，里面定义的是该 RuleExecutor 的处理步骤 。每个 Batch代表一套规则，配备一个策略，该策略说明了迭代次数( 一次还是多次)。 RuleExecutor 的 apply(plan: TreeType): TreeType 方法会按照 batches顺序和 batch 内的 Rules顺序，对传入的 plan 里的节点进行迭代处理，处理逻辑由具体 Rule 子类实现 。
-* Analyzer继承RuleExecutor，它的解析过程为调用execute方法，内部大致逻辑是拿到这个logicplan，然后遍历batch，遍历每个batch内的rule【有固定的次数】,将rule作用在logicplan。为什么要多次遍历batch内的所有rule?因为有时候解析节点时有的节点所依赖的节点还没有被解析出来。
+一个sparksession对应一个Catalog。
+
+在生成AnalyzedLogicalPlan时，需要用到
+
+* Rule，它的apply方法规定TreeType到TreeType间的转化逻辑,而且这个TreeType须是TreeNode的子类
+* RuleExecutor内部持有batches,里面的每个Batch都和一个Rule相关联，execute方法会迭代所有的rule。
 
 ```scala
 //Rule
@@ -714,9 +714,11 @@ abstract class RuleExecutor[TreeType <: TreeNode[_]] extends Logging {
 }
 ```
 
+生成AnalyzedLogicalPlan：触发Analyzer的execute方法，遍历所有batch中的rules并执行。
+
 ### 3.3 Optimizer
 
-Optimizer 同样继承自 RuleExecutor 类，本身没有重载 RuleExecutor 中的 execute 方法，因此其执行过程仍然是调用其父类 RuleExecutor 中实现的 execute方法。传入AnalyzedLogica!Plan执行execute方 法，启动优化过程 。
+Optimizer 同样继承自 RuleExecutor 类，本身没有重载 RuleExecutor 中的 execute 方法，因此其执行过程仍然是调用其父类 RuleExecutor 中实现的 execute方法。传入AnalyzedLogicalPlan执行execute方 法，启动优化过程 。
 
 Spark内置了多个batch，如Batch Operator Optimizations，它负责 Operator解析规则和优化，常见的优化方式有以下3种：
 
